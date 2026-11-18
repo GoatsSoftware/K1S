@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: goatgambling
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: game-service
+  namespace: goatgambling
+  labels:
+    app: game-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: game-service
+  template:
+    metadata:
+      labels:
+        app: game-service
+    spec:
+      containers:
+      - name: game-service
+        image: k1s/game-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50051
+          name: grpc
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "250m"
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-service
+  namespace: goatgambling
+  labels:
+    app: game-service
+spec:
+  selector:
+    app: game-service
+  ports:
+  - port: 50051
+    targetPort: 50051
+    name: grpc
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leaderboard-service
+  namespace: goatgambling
+  labels:
+    app: leaderboard-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: leaderboard-service
+  template:
+    metadata:
+      labels:
+        app: leaderboard-service
+    spec:
+      containers:
+      - name: leaderboard-service
+        image: k1s/leaderboard-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 50052
+          name: grpc
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "250m"
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: leaderboard-service
+  namespace: goatgambling
+  labels:
+    app: leaderboard-service
+spec:
+  selector:
+    app: leaderboard-service
+  ports:
+  - port: 50052
+    targetPort: 50052
+    name: grpc
+  type: ClusterIP

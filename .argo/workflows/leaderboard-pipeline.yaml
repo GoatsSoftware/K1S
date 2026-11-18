@@ -1,0 +1,103 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: k1s-leaderboard-service-
+  labels:
+    app: leaderboard-service
+spec:
+  entrypoint: build-and-deploy
+  serviceAccountName: argo-workflow
+
+  templates:
+  - name: build-and-deploy
+    dag:
+      tasks:
+      - name: test
+        template: run-tests
+        arguments:
+          parameters:
+          - name: service
+            value: leaderboard-service
+
+      - name: build
+        template: buildx-build
+        depends: test.Succeeded
+        arguments:
+          parameters:
+          - name: service
+            value: leaderboard-service
+          - name: image
+            value: "{{ workflow.parameters.registry }}/leaderboard-service"
+
+      - name: deploy
+        template: deploy-to-k8s
+        depends: build.Succeeded
+        arguments:
+          parameters:
+          - name: service
+            value: leaderboard-service
+
+  - name: run-tests
+    inputs:
+      parameters:
+      - name: service
+    container:
+      image: python:3.11@sha256:0fb0ee1481f2b59c250995d457pye9ac89d10c6916dfac6ee5c0d1d1d7d8d9e
+      workingDir: /workspace/apps/{{ inputs.parameters.service }}
+      command: [sh, -c]
+      args:
+      - |
+        pip install -q -r requirements.txt pytest
+        python -m pytest -v
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+
+  - name: buildx-build
+    inputs:
+      parameters:
+      - name: service
+      - name: image
+    container:
+      image: docker:dind@sha256:0fb0ee1481f2b59c250995d457pye9ac89d10c6916dfac6ee5c0d1d1d7d8d9e
+      command: [docker]
+      args:
+      - buildx
+      - build
+      - --platform=linux/amd64,linux/arm64
+      - -t
+      - "{{ inputs.parameters.image }}:latest"
+      - -f
+      - apps/{{ inputs.parameters.service }}/Dockerfile
+      - apps
+      volumeMounts:
+      - name: workspace
+        mountPath: /workspace
+      - name: docker-socket
+        mountPath: /var/run/docker.sock
+
+  - name: deploy-to-k8s
+    inputs:
+      parameters:
+      - name: service
+    container:
+      image: bitnami/kubectl:latest@sha256:0fb0ee1481f2b59c250995d457pye9ac89d10c6916dfac6ee5c0d1d1d7d8d9e
+      command: [kubectl]
+      args:
+      - set
+      - image
+      - "deployment/{{ inputs.parameters.service }}"
+      - "{{ inputs.parameters.service }}={{ .Values.registry }}/{{ inputs.parameters.service }}:latest"
+      - -n
+      - goatgambling
+
+  volumes:
+  - name: workspace
+    emptyDir: {}
+  - name: docker-socket
+    hostPath:
+      path: /var/run/docker.sock
+
+  parameters:
+  - name: registry
+    value: k1s-registry

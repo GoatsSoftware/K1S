@@ -208,6 +208,10 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# gRPC generated files
+*_pb2.py
+*_pb2_grpc.py
+
 # Ruff stuff:
 .ruff_cache/
 
@@ -221,3 +225,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Frontend
+node_modules/
+.astro/

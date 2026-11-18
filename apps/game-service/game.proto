@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package game;
+
+service GameService {
+  rpc PlaceBet(BetRequest) returns (BetResponse);
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+  rpc CashOut(CashOutRequest) returns (CashOutResponse);
+}
+
+message CashOutRequest {}
+
+message CashOutResponse {
+  uint32 final_balance = 1;
+  uint32 new_balance = 2;
+}
+
+message BetRequest {
+  uint32 amount = 1;
+}
+
+message BetResponse {
+  bool win = 1;
+  uint32 payout = 2;
+  string message = 3;
+  uint32 roll = 4;
+}
+
+message GetBalanceRequest {}
+
+message GetBalanceResponse {
+  uint32 balance = 1;
+}

@@ -14,7 +14,7 @@ concurrency:
 
 env:
   REGISTRY: harbor.techops.tf
-  PROJECT: gambling-goat
+  PROJECT: goat-gambling
   BUILDKIT_ENDPOINT: tcp://buildkit.techops.tf:31234
 
 jobs:

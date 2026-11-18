@@ -23,11 +23,20 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
-          GITLEAKS_ENABLE_SUMMARY: "true"
+      # CLI gitleaks directement : l'action officielle exige une licence pour les organisations.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz | tar xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+      - name: Scan secrets
+        run: gitleaks git --redact --report-format json --report-path gitleaks-report.json --exit-code 1 .
+      - name: Upload secrets report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secrets-report
+          path: gitleaks-report.json
+          if-no-files-found: warn
 
   backend-test:
     runs-on: ubuntu-latest

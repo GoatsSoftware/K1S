@@ -1,0 +1,264 @@
+name: ci
+
+on:
+  push:
+    branches: [main, "tp/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: harbor.techops.tf
+  PROJECT: goat-gambling
+  BUILDKIT_ENDPOINT: tcp://buildkit.buildkit.svc:1234
+
+jobs:
+  secrets:
+    runs-on: github-runner-scale-set-k1s
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # CLI gitleaks directement : l'action officielle exige une licence pour les organisations.
+      - name: Install gitleaks
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz | tar xz -C "$HOME/.local/bin" gitleaks
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Scan secrets
+        run: gitleaks git --redact --report-format json --report-path gitleaks-report.json --exit-code 1 .
+      - name: Upload secrets report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secrets-report
+          path: gitleaks-report.json
+          if-no-files-found: warn
+
+  backend-test:
+    runs-on: github-runner-scale-set-k1s
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [game-service, leaderboard-service, api-gateway]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Generate gRPC stubs
+        run: |
+          for svc in game-service leaderboard-service; do
+            (cd apps/$svc && python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. *.proto)
+          done
+      - name: Pytest
+        working-directory: apps/${{ matrix.service }}
+        run: python -m pytest --junitxml=junit.xml --cov-report=xml --cov-report=html
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.service }}
+          path: |
+            apps/${{ matrix.service }}/junit.xml
+            apps/${{ matrix.service }}/coverage.xml
+            apps/${{ matrix.service }}/htmlcov
+          if-no-files-found: warn
+
+  backend-quality:
+    runs-on: github-runner-scale-set-k1s
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff lint
+        run: ruff check apps --output-format=github --output-file=ruff-lint.txt || (cat ruff-lint.txt; exit 1)
+      - name: Ruff format
+        run: ruff format --check --diff apps | tee ruff-format.txt; test ${PIPESTATUS[0]} -eq 0
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report-backend
+          path: |
+            ruff-lint.txt
+            ruff-format.txt
+          if-no-files-found: warn
+
+  backend-image:
+    needs: [secrets, backend-test, backend-quality]
+    runs-on: github-runner-scale-set-k1s
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [game-service, leaderboard-service, api-gateway]
+    steps:
+      - uses: actions/checkout@v4
+      - id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_ENDPOINT }}
+          driver-opts: |
+            cacert=/etc/buildkit/tls/ca.pem
+            cert=/etc/buildkit/tls/cert.pem
+            key=/etc/buildkit/tls/key.pem
+      - name: Login to Harbor
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.service }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          platforms: linux/amd64
+          provenance: false
+          context: apps
+          file: apps/${{ matrix.service }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image by digest
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          umask 077
+          key_file=$(mktemp "$RUNNER_TEMP/cosign.XXXXXX")
+          trap 'rm -f -- "$key_file"' EXIT
+          printf '%s\n' "$COSIGN_PRIVATE_KEY" > "$key_file"
+          cosign sign --yes --key "$key_file" --tlog-upload=false "${IMAGE}@${DIGEST}"
+
+  frontend-test:
+    runs-on: github-runner-scale-set-k1s
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      - name: Build (compilation Astro)
+        run: npm run build 2>&1 | tee build.log; test ${PIPESTATUS[0]} -eq 0
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-frontend
+          path: apps/frontend/build.log
+          if-no-files-found: warn
+
+  frontend-quality:
+    runs-on: github-runner-scale-set-k1s
+    defaults:
+      run:
+        working-directory: apps/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/frontend/package-lock.json
+      - run: npm ci
+      # Échoue sur les vulnérabilités critiques ; le rapport complet reste en artefact.
+      - name: npm audit
+        run: |
+          npm audit --json > npm-audit.json || true
+          npm audit --audit-level=critical
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-report-frontend
+          path: apps/frontend/npm-audit.json
+          if-no-files-found: warn
+
+  frontend-image:
+    needs: [secrets, frontend-test, frontend-quality]
+    runs-on: github-runner-scale-set-k1s
+    steps:
+      - uses: actions/checkout@v4
+      - id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: remote
+          endpoint: ${{ env.BUILDKIT_ENDPOINT }}
+          driver-opts: |
+            cacert=/etc/buildkit/tls/ca.pem
+            cert=/etc/buildkit/tls/cert.pem
+            key=/etc/buildkit/tls/key.pem
+      - name: Login to Harbor
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.PROJECT }}/frontend
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          platforms: linux/amd64
+          provenance: false
+          context: apps/frontend
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign image by digest
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.PROJECT }}/frontend
+          DIGEST: ${{ steps.build.outputs.digest }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+        run: |
+          umask 077
+          key_file=$(mktemp "$RUNNER_TEMP/cosign.XXXXXX")
+          trap 'rm -f -- "$key_file"' EXIT
+          printf '%s\n' "$COSIGN_PRIVATE_KEY" > "$key_file"
+          cosign sign --yes --key "$key_file" --tlog-upload=false "${IMAGE}@${DIGEST}"

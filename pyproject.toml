@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-v --tb=short --cov=. --cov-report=xml --cov-report=term-missing"
+python_files = ["test_*.py"]
+markers = [
+    "unit: unit tests",
+    "integration: integration tests",
+]
